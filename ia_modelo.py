@@ -1,15 +1,15 @@
-import sqlite3
 import pandas as pd
 import requests
-import numpy as np
+from config_nube import supabase
 
 def consultar_clima_local():
-    # Coordenadas configuradas para análisis meteorológico local (Lat: 4.70, Lon: -74.23)
+    """Consulta el pronóstico del tiempo en tiempo real usando Open-Meteo"""
+    # Coordenadas configuradas para Cundinamarca / Sabana
     url = "https://api.open-meteo.com/v1/forecast?latitude=4.70&longitude=-74.23&hourly=precipitation&timezone=auto&forecast_days=1"
     try:
         respuesta = requests.get(url)
         datos = respuesta.json()
-        # Analizamos si hay probabilidad de lluvia (> 1mm) en las próximas 6 horas
+        # Analizamos si hay probabilidad de lluvia en las próximas 6 horas
         precipitacion_proximas_horas = datos['hourly']['precipitation'][:6]
         lluvia_total = sum(precipitacion_proximas_horas)
         return lluvia_total
@@ -18,46 +18,55 @@ def consultar_clima_local():
         return 0.0
 
 def predecir_y_decidir():
-    # 1. Leer los datos locales del lote agrícola
-    conexion = sqlite3.connect("base_datos_reyxa.db")
-    df = pd.read_sql_query("SELECT id, temperatura, humedad_suelo FROM registro_sensores ORDER BY id ASC", conexion)
-    conexion.close()
+    """
+    Motor de IA Agronómica de REYXA.
+    Combina variables edafoclimáticas de Supabase con pronóstico meteorológico externo.
+    """
+    try:
+        # 1. Leer los datos más recientes del lote desde Supabase
+        response = supabase.table("registro_sensores").select("*").order("id", desc=True).limit(50).execute()
+        df = pd.DataFrame(response.data)
 
-    if len(df) < 5:
-        return {"estado": "info", "mensaje": "Recopilando datos del lote para calibrar el modelo..."}
-
-    humedad_actual = df['humedad_suelo'].iloc[-1]
-    
-    # 2. Consultar el pronóstico externo
-    lluvia_esperada_mm = consultar_clima_local()
-    
-    print("\n" + "="*40)
-    print("🧠 MOTOR DE DECISIÓN REYXA")
-    print(f"Humedad actual del suelo: {humedad_actual:.2f}%")
-    print(f"Lluvia proyectada (6h): {lluvia_esperada_mm:.2f} mm")
-    print("="*40)
-
-    # 3. Lógica Difusa para toma de decisiones
-    if humedad_actual < 40.0:
-        if lluvia_esperada_mm > 2.0:
+        if df.empty or len(df) < 2:
             return {
-                "estado": "warning", 
-                "mensaje": f"⚠️ Suelo seco ({humedad_actual:.1f}%), pero se aproxima lluvia ({lluvia_esperada_mm}mm). DECISIÓN: Bloquear riego preventivo para evitar exceso de agua."
+                "estado": "info", 
+                "mensaje": "⚠️ Recopilando datos del lote en la nube para calibrar el modelo..."
+            }
+
+        humedad_actual = float(df['humedad_suelo'].iloc[0])
+        temp_actual = float(df['temperatura'].iloc[0])
+        ph_actual = float(df['ph'].iloc[0]) if 'ph' in df.columns else 6.5
+        
+        # 2. Consultar el pronóstico externo (Open-Meteo)
+        lluvia_esperada_mm = consultar_clima_local()
+        
+        # 3. Lógica experta de toma de decisiones
+        if humedad_actual < 40.0:
+            if lluvia_esperada_mm > 2.0:
+                return {
+                    "estado": "warning", 
+                    "mensaje": f"⚠️ Suelo seco ({humedad_actual:.1f}%), pero se aproxima lluvia ({lluvia_esperada_mm:.1f}mm). DECISIÓN: Bloquear riego preventivo para evitar encharcamiento."
+                }
+            else:
+                return {
+                    "estado": "error", 
+                    "mensaje": f"🚨 Suelo en estrés hídrico ({humedad_actual:.1f}%) y sin lluvia en el radar. DECISIÓN: Activar válvulas de riego inmediatamente."
+                }
+        elif 40.0 <= humedad_actual <= 65.0:
+            return {
+                "estado": "success", 
+                "mensaje": f"🌱 Humedad óptima ({humedad_actual:.1f}%). pH: {ph_actual}. DECISIÓN: Mantener válvulas cerradas. Sistema estable."
             }
         else:
             return {
-                "estado": "error", 
-                "mensaje": f"🚨 Suelo en estrés hídrico ({humedad_actual:.1f}%) y sin lluvia en el radar. DECISIÓN: Activar válvulas de riego inmediatamente."
+                "estado": "info", 
+                "mensaje": f"💧 Suelo saturado ({humedad_actual:.1f}%). DECISIÓN: Monitorear el drenaje del terreno y canales."
             }
-    elif humedad_actual >= 40.0 and humedad_actual <= 65.0:
+
+    except Exception as e:
         return {
-            "estado": "success", 
-            "mensaje": f"🌱 Humedad óptima ({humedad_actual:.1f}%). DECISIÓN: Mantener válvulas cerradas."
-        }
-    else:
-        return {
-            "estado": "info", 
-            "mensaje": f"💧 Suelo saturado ({humedad_actual:.1f}%). DECISIÓN: Monitorear el drenaje del terreno."
+            "estado": "error",
+            "mensaje": f"❌ Error en el motor analítico de la nube: {e}"
         }
 
 if __name__ == "__main__":
