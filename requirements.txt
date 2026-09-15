@@ -3,3 +3,4 @@ pandas
 paho-mqtt
 scikit-learn
 requests
+supabase
